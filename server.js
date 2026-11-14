@@ -239,16 +239,23 @@ app.post("/checkout", async (req, res) => {
         console.log("✅ ADMIN INVOICE SENT:", adminResult);
 
         // 2. CUSTOMER EMAIL ONLY IF VALID
+        //    Kept in its own try/catch: while the Resend domain is unverified,
+        //    sends to customers are rejected — that must never fail the checkout
+        //    (the admin copy + invoice number are already done at this point).
         if (safeEmail) {
-            const customerResult = await resend.emails.send({
-                from: FROM_EMAIL,
-                to: safeEmail,
-                subject: `Your LocalTech Invoice #${invoiceNumber}`,
-                html: invoiceHtml,
-                attachments: invoiceAttachments,
-            });
+            try {
+                const customerResult = await resend.emails.send({
+                    from: FROM_EMAIL,
+                    to: safeEmail,
+                    subject: `Your LocalTech Invoice #${invoiceNumber}`,
+                    html: invoiceHtml,
+                    attachments: invoiceAttachments,
+                });
 
-            console.log("✅ CUSTOMER INVOICE SENT:", customerResult);
+                console.log("✅ CUSTOMER INVOICE SENT:", customerResult);
+            } catch (custErr) {
+                console.error("⚠️ Customer invoice failed (admin copy was sent):", custErr.message);
+            }
         } else {
             console.log("⚠️ No customer email provided - skipped");
         }
