@@ -74,20 +74,36 @@ app.post("/send-email", async (req, res) => {
         return res.status(400).json({ error: "Missing fields" });
     }
 
+    // Escape user input so it can't break the email HTML
+    const esc = (v) => String(v == null ? "" : v)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+
     try {
         const result = await resend.emails.send({
             from: FROM_EMAIL,
             to: ADMIN_EMAIL,
+            replyTo: email,
             subject: `Contact Form - ${name}`,
             html: `
                 <h2>New Contact Message</h2>
-                <p><b>Name:</b> ${name}</p>
-                <p><b>Email:</b> ${email}</p>
-                <p><b>Message:</b><br>${message}</p>
+                <p><b>Name:</b> ${esc(name)}</p>
+                <p><b>Email:</b> ${esc(email)}</p>
+                <p><b>Message:</b><br>${esc(message).replace(/\n/g, "<br>")}</p>
             `,
         });
 
-        console.log("✅ CONTACT EMAIL SENT:", result);
+        // The SDK returns { data, error } instead of throwing — check it,
+        // otherwise rejections get logged as success.
+        if (result.error) {
+            console.error("❌ CONTACT EMAIL REJECTED BY RESEND:", JSON.stringify(result.error));
+            return res.status(502).json({ error: "Email rejected by provider" });
+        }
+
+        console.log("✅ CONTACT EMAIL SENT:", result.data);
         res.json({ success: true });
 
     } catch (err) {
