@@ -2,14 +2,18 @@
 // Invoice numbering + HTML invoice builder for LocalTech order emails.
 //
 // The invoice number is sequential and starts at 200 (or the INVOICE_START
-// env var if it is set higher). The last-used number is persisted in
-// data/invoice-counter.json so numbers keep climbing.
+// env var if it is set higher).
 //
-// ⚠️ RENDER NOTE: the filesystem on Render's free tier is wiped on every
-// redeploy. To keep numbers true across deploys either:
-//   a) attach a persistent disk to the service, or
-//   b) after a redeploy, set the INVOICE_START env var to the next number
-//      you need (it acts as a floor — the counter will never go below it).
+// Storage order of preference:
+//   1. MongoDB counter (data/invoice-counter collection) — survives Render
+//      redeploys, restarts AND the 15-minute spin-down, and is atomic, so
+//      two checkouts at the same instant can never share a number.
+//   2. data/invoice-counter.json — local/dev fallback only. On Render's free
+//      plan this file is wiped on every restart (that is why numbers used to
+//      snap back to 200), so INVOICE_START acts as a floor there: after a
+//      wipe set INVOICE_START to the next number you need.
+//
+// getNextInvoiceNumber() is ASYNC — always await it.
 
 const fs = require("fs");
 const path = require("path");
@@ -20,10 +24,39 @@ const COUNTER_FILE = path.join(DATA_DIR, "invoice-counter.json");
 // ========================
 // Invoice numbers
 // ========================
-function getNextInvoiceNumber() {
+async function getNextInvoiceNumber() {
     const seed = parseInt(process.env.INVOICE_START || "200", 10) || 200;
-    let next = seed;
 
+    // 1) MongoDB — the real fix for the "reverts to 200" bug
+    try {
+        const { dbReady } = require("./db");
+        const db = await dbReady();
+        if (db) {
+            const result = await db.collection("counters").findOneAndUpdate(
+                { _id: "invoice" },
+                [
+                    {
+                        $set: {
+                            last: {
+                                $max: [
+                                    { $add: [{ $ifNull: ["$last", seed - 1] }, 1] },
+                                    seed,
+                                ],
+                            },
+                        },
+                    },
+                ],
+                { upsert: true, returnDocument: "after" }
+            );
+            const doc = result && result.value !== undefined ? result.value : result;
+            if (doc && Number.isInteger(doc.last)) return doc.last;
+        }
+    } catch (err) {
+        console.error("⚠️ MongoDB invoice counter failed, using file:", err.message);
+    }
+
+    // 2) File fallback (local development, or Atlas not configured yet)
+    let next = seed;
     try {
         if (fs.existsSync(COUNTER_FILE)) {
             const saved = JSON.parse(fs.readFileSync(COUNTER_FILE, "utf8"));
