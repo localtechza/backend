@@ -6,6 +6,7 @@ const path = require("path");
 const fs = require("fs");
 const { Resend } = require("resend");
 const { getNextInvoiceNumber, formatInvoiceDate, buildInvoiceHtml } = require("./invoice");
+const { buildBookingHtml } = require("./bookingEmail");
 const { ORDER_STATUSES, initialStatus, isValidStatus } = require("./statuses");
 const {
     makeAdminToken,
@@ -153,30 +154,47 @@ app.post("/send-email", async (req, res) => {
 // 2. BOOKING EMAIL
 // ======================================================
 app.post("/book-service", async (req, res) => {
-    const { service, date, name, email, phone, address, notes } = req.body;
+    const { service, date, name, email, phone, address, notes, delivery } = req.body;
 
     if (!service || !date || !name || !email || !phone || !address) {
         return res.status(400).json({ error: "Missing booking fields" });
     }
 
     try {
+        // 1. Admin notification — branded to match the invoice emails.
         const result = await resend.emails.send({
             from: FROM_EMAIL,
             to: ADMIN_EMAIL,
-            subject: `Booking - ${name}`,
-            html: `
-                <h2>New Booking</h2>
-                <p><b>Service:</b> ${service}</p>
-                <p><b>Date:</b> ${date}</p>
-                <p><b>Name:</b> ${name}</p>
-                <p><b>Email:</b> ${email}</p>
-                <p><b>Phone:</b> ${phone}</p>
-                <p><b>Address:</b> ${address}</p>
-                <p><b>Notes:</b> ${notes || "None"}</p>
-            `,
+            subject: `New Booking - ${name}`,
+            html: buildBookingHtml({
+                name, email, phone, address, service, date, notes, delivery,
+                audience: "admin",
+            }),
+            attachments: invoiceAttachments,
         });
 
         console.log("✅ BOOKING EMAIL SENT:", result);
+
+        // 2. Customer confirmation — own styled copy of the booking details.
+        //    Separate try/catch so a rejected customer address never loses the booking.
+        if (email && /.+@.+/.test(email)) {
+            try {
+                const customerResult = await resend.emails.send({
+                    from: FROM_EMAIL,
+                    to: email,
+                    subject: "Your LocalTech booking confirmation",
+                    html: buildBookingHtml({
+                        name, email, phone, address, service, date, notes, delivery,
+                        audience: "customer",
+                    }),
+                    attachments: invoiceAttachments,
+                });
+                console.log("✅ CUSTOMER BOOKING EMAIL SENT:", customerResult);
+            } catch (custErr) {
+                console.error("⚠️ Customer booking email failed (admin copy was sent):", custErr.message);
+            }
+        }
+
         captureEmail(email, name, "booking"); // PC repair customers can log in too
         res.json({ success: true });
 
