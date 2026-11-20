@@ -233,8 +233,13 @@ function buildInvoiceHtml({
     let paymentNote = "";
     if (paymentMethod && paymentMethod.toUpperCase() === "EFT") {
         paymentNote = `<p style="margin:0 0 8px; color:#374151; font-size:14px;">
-            <strong>Payment due via EFT.</strong> Please email proof of payment to
-            localtechza@gmail.com and quote <strong>${esc(invoiceNumber)}</strong> as your reference.
+            <strong>Payment due via EFT to:</strong><br>
+            <strong>Bank:</strong> Capitec &nbsp;·&nbsp;
+            <strong>Account name:</strong> LocalTech &nbsp;·&nbsp;
+            <strong>Account:</strong> 1681446705 &nbsp;·&nbsp;
+            <strong>Branch code:</strong> 470010<br>
+            Please email proof of payment to localtechza@gmail.com and quote
+            <strong>${esc(invoiceNumber)}</strong> as your reference.
         </p>`;
     } else {
         paymentNote = `<p style="margin:0 0 8px; color:#374151; font-size:14px;">
@@ -250,11 +255,10 @@ function buildInvoiceHtml({
         : "";
 
     // ---------- Footer ----------
-    // TODO: Replace [YOUR BUSINESS ADDRESS] below with your real business address
     const footer = `
         <div style="border-top:1px solid #e5e7eb; padding-top:14px; font-family:Arial,Helvetica,sans-serif; color:#9ca3af; font-size:12px; text-align:center; line-height:1.7;">
             <strong style="color:#2563EB;">LocalTech</strong> — Chosen Thoughtfully<br>
-            081 6422 215 &nbsp;·&nbsp; localtechza@gmail.com &nbsp;·&nbsp; [YOUR BUSINESS ADDRESS]<br>
+            081 6422 215 &nbsp;·&nbsp; localtechza@gmail.com &nbsp;·&nbsp; 44 Kundalila Road, Waterfall, KZN<br>
             Invoice #${esc(invoiceNumber)} · ${esc(date)} · ${esc(transactionId)}
         </div>`;
 
