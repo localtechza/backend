@@ -142,11 +142,30 @@ async function checkout(email, label) {
         const token4 = r.json.token;
 
         // ---------------------------------------------------------
-        console.log("\n3) Unverified session sees ONLY its own order…");
+        console.log("\n3) Orders STACK for the customer (every order, newest first)…");
         r = await req("GET", "/auth/orders", null, token1);
         check("orders fetch ok", r.status === 200, String(r.status));
-        check("unverified -> exactly 1 order", r.json.orders && r.json.orders.length === 1, `got ${r.json.orders && r.json.orders.length}`);
+        check("unverified -> all 4 orders stack",
+            r.json.orders && r.json.orders.length === 4,
+            `got ${r.json.orders && r.json.orders.length}`);
+        check("newest order listed first",
+            r.json.orders[0] && r.json.orders[0].invoiceNumber === 203,
+            `got ${r.json.orders[0] && r.json.orders[0].invoiceNumber}`);
+        check("oldest order still listed",
+            r.json.orders.some((o) => o.invoiceNumber === 200));
         check("flagged unverified", r.json.verified === false);
+
+        // A different customer must never see someone else's orders
+        const other = await checkout("other@test.com");
+        check("second buyer checkout ok", other.status === 200, JSON.stringify(other.json));
+        r = await req("GET", "/auth/orders", null, other.json.token);
+        check("other buyer sees only their own order",
+            r.json.orders && r.json.orders.length === 1 && r.json.orders[0].invoiceNumber === 204,
+            JSON.stringify(r.json.orders && r.json.orders.map((o) => o.invoiceNumber)));
+        r = await req("GET", "/auth/orders", null, token1);
+        check("first buyer still sees exactly their 4 orders",
+            r.json.orders && r.json.orders.length === 4,
+            `got ${r.json.orders && r.json.orders.length}`);
 
         r = await req("GET", "/auth/orders", null, "not-a-real-token");
         check("bogus token rejected", r.status === 401, String(r.status));
@@ -191,8 +210,11 @@ async function checkout(email, label) {
         const adminToken = r.json.token;
 
         r = await req("GET", "/admin/orders", null, adminToken);
-        check("admin sees all 4 orders", r.json.orders && r.json.orders.length === 4, `got ${r.json.orders && r.json.orders.length}`);
-        check("admin sees customer email", r.json.orders[0].email === "buyer@test.com", r.json.orders[0].email);
+        check("admin sees all 5 orders", r.json.orders && r.json.orders.length === 5, `got ${r.json.orders && r.json.orders.length}`);
+        check("admin sees customer email",
+            r.json.orders.some((o) => o.email === "buyer@test.com") &&
+            r.json.orders.some((o) => o.email === "other@test.com"),
+            JSON.stringify(r.json.orders.map((o) => o.email)));
         check("status list published", r.json.statuses && r.json.statuses.includes("Ready for pickup"));
 
         r = await req("GET", "/admin/orders");

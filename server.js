@@ -599,9 +599,11 @@ app.post("/auth/logout", async (req, res) => {
 });
 
 // 6d. The signed-in customer's orders.
-//     Verified sessions see every order for their email; unverified ones
-//     (created at checkout, before the emailed code was entered) see only
-//     the order they were created with.
+//     A session always belongs to one email address, so it sees EVERY order
+//     placed with that address — orders stack in one list no matter how many
+//     are placed or from which device, and each one keeps its own status
+//     history. (The sourceToken clause only covers older orders that were
+//     saved without an email.)
 app.get("/auth/orders", async (req, res) => {
     try {
         const session = await getSession(req);
@@ -610,9 +612,10 @@ app.get("/auth/orders", async (req, res) => {
         const orders = await collection("orders");
         if (!orders) return res.json({ orders: [], verified: session.verified });
 
-        const query = session.verified
-            ? { email: session.email }
-            : { sourceToken: session.token };
+        const clauses = [];
+        if (session.email) clauses.push({ email: session.email });
+        if (session.token) clauses.push({ sourceToken: session.token });
+        const query = clauses.length ? { $or: clauses } : { _id: { $exists: false } };
         const docs = await orders
             .find(query)
             .sort({ createdAt: -1 })
