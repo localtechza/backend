@@ -30,6 +30,10 @@ const PORT = process.env.PORT || 10000;
 // Where the customer lands after Paystack (HashRouter deep link)
 const SITE_URL = (process.env.SITE_URL || "https://localtechza.github.io").replace(/\/+$/, "");
 
+// Courier is FREE on every order. Must match COURIER_FEE in the frontend
+// Checkout.js, otherwise the invoice will disagree with the checkout total.
+const COURIER_FEE = 0;
+
 // ========================
 // Middleware
 // ========================
@@ -220,8 +224,10 @@ app.post("/initialize-payment", async (req, res) => {
             email,
             amount: amount * 100,
             currency: "ZAR",
-            // Land back on the site's payment-result page after paying
-            callback_url: `${SITE_URL}/#/checkout-result`,
+            // Land back on the site's payment-result page after paying.
+            // BrowserRouter (no "#") — the ?reference= param lands in the real
+            // query string, which CheckoutResult reads via useSearchParams.
+            callback_url: `${SITE_URL}/checkout-result`,
         };
         // Use OUR reference (the order's TXN id) so the verification step can
         // find the order again. Paystack allows A-Z a-z 0-9 - _ . up to 50.
@@ -331,8 +337,10 @@ app.post("/checkout", async (req, res) => {
 
     // Amounts are calculated from the cart so the invoice always matches
     // what the client was charged at checkout (subtotal + shipping).
+    // COURIER_FEE = 0 -> free shipping on all orders. Set to 120 to charge
+    // again; must match COURIER_FEE in frontend Checkout.js.
     const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-    const shippingFee = shippingOption === "courier" ? 120 : 0;
+    const shippingFee = shippingOption === "courier" ? COURIER_FEE : 0;
     const grandTotal = subtotal + shippingFee;
 
     // Retry safety: if this reference was already booked (e.g. the payment
