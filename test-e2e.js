@@ -270,19 +270,11 @@ async function checkout(email, label) {
         check("captured email can request a login code", r.status === 200 && r.json.success, JSON.stringify(r.json));
 
         // ---------------------------------------------------------
-        console.log("\n9) Paystack initialisation accepts our reference + callback…");
-        if (process.env.PAYSTACK_SECRET_KEY || require("dotenv").config().parsed?.PAYSTACK_SECRET_KEY) {
-            r = await req("POST", "/initialize-payment", {
-                email: "buyer@test.com",
-                amount: 100,
-                reference: `TXN-E2E-${Date.now()}`,
-            });
-            check("Paystack accepted reference + callback_url",
-                r.status === 200 && r.json.data && r.json.data.authorization_url,
-                JSON.stringify(r.json).slice(0, 300));
-        } else {
-            console.log("  SKIP no Paystack key available");
-        }
+        console.log("\n9) Payment providers…");
+        console.log("  SKIP Paystack — merchant account was declined/deactivated; code parked but retired");
+        const stitchReady = !!(process.env.STITCH_CLIENT_ID && process.env.STITCH_CLIENT_SECRET);
+        console.log(`  Stitch test credentials present in env: ${stitchReady}`);
+        console.log("  SKIP live Stitch API calls — integration is tested against the dashboard checklist");
 
         // ---------------------------------------------------------
         console.log("\n10) Logout…");

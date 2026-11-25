@@ -4,6 +4,7 @@ const cors = require("cors");
 const axios = require("axios");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const { Resend } = require("resend");
 const { getNextInvoiceNumber, formatInvoiceDate, buildInvoiceHtml } = require("./invoice");
 const { buildBookingHtml } = require("./bookingEmail");
@@ -35,8 +36,24 @@ const SITE_URL = (process.env.SITE_URL || "https://localtechza.github.io").repla
 const COURIER_FEE = 0;
 
 // ========================
+// Stitch Express (card payments — test mode until approved)
+// ========================
+const STITCH_API = "https://express.stitch.money";
+const STITCH_CLIENT_ID = process.env.STITCH_CLIENT_ID || "";
+const STITCH_CLIENT_SECRET = process.env.STITCH_CLIENT_SECRET || "";
+const STITCH_WEBHOOK_SECRET = process.env.STITCH_WEBHOOK_SECRET || "";
+const STITCH_MODE = String(process.env.STITCH_MODE || "test").toLowerCase() === "live" ? "live" : "test";
+
+// Registered in the Stitch dashboard via POST /api/v1/redirect-urls.
+// Customers land here after the hosted Stitch checkout.
+const STITCH_REDIRECT_URL = "https://localtechza.co.za/checkout-result";
+
+// ========================
 // Middleware
 // ========================
+// Webhook signatures are calculated over the RAW request body, so this route
+// must read bytes before express.json() parses anything.
+app.use("/api/webhooks/stitch", express.raw({ type: "application/json" }));
 app.use(express.json());
 app.use(cors());
 
@@ -62,6 +79,7 @@ const clientIp = (req) =>
 // ========================
 console.log("Resend Loaded:", !!process.env.RESEND_API_KEY);
 console.log("Paystack Loaded:", !!process.env.PAYSTACK_SECRET_KEY);
+console.log("Stitch Loaded:", !!STITCH_CLIENT_ID && !!STITCH_CLIENT_SECRET, `(${STITCH_MODE} mode)`);
 
 // ========================
 // Services
@@ -287,7 +305,7 @@ app.get("/verify-payment/:reference", async (req, res) => {
 
 // Flip a stored order to "Payment confirmed" when Paystack says the money
 // arrived. Never downgrades an order you already advanced by hand.
-async function confirmOrderPayment(transactionId) {
+async function confirmOrderPayment(transactionId, provider = "Paystack") {
     try {
         const orders = await collection("orders");
         if (!orders || !transactionId) return;
@@ -297,7 +315,7 @@ async function confirmOrderPayment(transactionId) {
             {
                 $set: { status: "Payment confirmed", updatedAt: now },
                 $push: {
-                    history: { status: "Payment confirmed", at: now, by: "Paystack" },
+                    history: { status: "Payment confirmed", at: now, by: provider },
                 },
             }
         );
@@ -310,10 +328,239 @@ async function confirmOrderPayment(transactionId) {
 }
 
 // ======================================================
+// 4b. STITCH EXPRESS (card payments — test mode until approved)
+// ======================================================
+let stitchTokenCache = { value: null, expiresAt: 0 };
+
+// Stitch access tokens last 15 minutes. Reuse until just before expiry.
+async function getStitchToken() {
+    if (stitchTokenCache.value && Date.now() < stitchTokenCache.expiresAt - 60 * 1000) {
+        return stitchTokenCache.value;
+    }
+    if (!STITCH_CLIENT_ID || !STITCH_CLIENT_SECRET) {
+        throw new Error("Stitch credentials are not configured");
+    }
+    const res = await axios.post(`${STITCH_API}/api/v1/token`, {
+        clientId: STITCH_CLIENT_ID,
+        clientSecret: STITCH_CLIENT_SECRET,
+        scope: "client_paymentrequest",
+    });
+    const token = res.data && res.data.data && res.data.data.accessToken;
+    if (!token) throw new Error("Stitch did not return an access token");
+    stitchTokenCache = { value: token, expiresAt: Date.now() + 15 * 60 * 1000 };
+    return token;
+}
+
+// Svix signs webhooks over the raw body using svix-id/timestamp/signature.
+function verifySvixSignature(req, rawBody, secret) {
+    const id = req.headers["svix-id"];
+    const timestamp = req.headers["svix-timestamp"];
+    const signature = req.headers["svix-signature"];
+    if (!id || !timestamp || !signature || !secret) return false;
+
+    const seconds = Number(timestamp);
+    if (!Number.isFinite(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300) return false;
+
+    const key = Buffer.from(String(secret).replace(/^whsec_/, ""), "base64");
+    const expected = crypto
+        .createHmac("sha256", key)
+        .update(`${id}.${timestamp}.${rawBody}`)
+        .digest("base64");
+
+    return String(signature).split(" ").some((part) => {
+        const [version, value] = part.split(",", 2);
+        if (version !== "v1" || !value) return false;
+        const a = Buffer.from(value, "base64");
+        const b = Buffer.from(expected, "base64");
+        return a.length === b.length && crypto.timingSafeEqual(a, b);
+    });
+}
+
+// Create a hosted Stitch checkout link. Amount arrives in rands; Stitch wants cents.
+app.post("/api/stitch/initialize", async (req, res) => {
+    if (!rateLimit(`stitch-init:${clientIp(req)}`, 30, 60 * 60 * 1000)) {
+        return res.status(429).json({ error: "Too many payment attempts — try again later." });
+    }
+
+    const { amount, name, email, phone, reference } = req.body;
+    const cents = Math.round(Number(amount) * 100);
+    if (!Number.isFinite(cents) || cents < 100) {
+        return res.status(400).json({ error: "Invalid payment amount" });
+    }
+
+    const trimmedName = String(name || "Customer").trim().slice(0, 40);
+    const merchantReference = String(reference || "").trim();
+    if (!/^[A-Za-z0-9 ._-]{1,50}$/.test(merchantReference)) {
+        return res.status(400).json({ error: "Invalid payment reference" });
+    }
+
+    try {
+        const token = await getStitchToken();
+        const payload = {
+            amount: cents,
+            payerName: trimmedName.length >= 3 ? trimmedName : "Customer",
+            merchantReference,
+            expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        };
+        if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            payload.payerEmailAddress = email;
+        }
+        const digits = String(phone || "").replace(/\D/g, "");
+        if (digits.length >= 9) {
+            payload.payerPhoneNumber = digits.startsWith("27")
+                ? `+${digits}`
+                : `+27${digits.replace(/^0/, "")}`;
+        }
+
+        const response = await axios.post(
+            `${STITCH_API}/api/v1/payment-links`,
+            payload,
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        const link = response.data && response.data.data && response.data.data.payment;
+        if (!link || !link.link || !link.id) {
+            throw new Error("Stitch did not return a payment link");
+        }
+
+        res.json({
+            success: true,
+            link: link.link,
+            linkId: link.id,
+            reference: merchantReference,
+            mode: STITCH_MODE,
+        });
+    } catch (err) {
+        console.error("❌ STITCH INIT ERROR:", err.response?.data || err.message);
+        res.status(500).json({ error: "Payment could not be started" });
+    }
+});
+
+// The browser redirect is NOT proof of payment — always ask Stitch.
+app.get("/api/stitch/status", async (req, res) => {
+    if (!rateLimit(`stitch-status:${clientIp(req)}`, 60, 60 * 60 * 1000)) {
+        return res.status(429).json({ error: "Too many status requests — try again later." });
+    }
+    const { linkId, reference } = req.query;
+    if (!linkId && !reference) {
+        return res.status(400).json({ error: "Missing payment reference" });
+    }
+
+    try {
+        const token = await getStitchToken();
+        let link = null;
+
+        if (linkId) {
+            const resLink = await axios.get(
+                `${STITCH_API}/api/v1/payment-links/${encodeURIComponent(linkId)}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            link = resLink.data && resLink.data.data && resLink.data.data.payment;
+        }
+
+        // Fallback for an older pending record that only stored the TXN id.
+        if (!link && reference) {
+            const orders = await collection("orders");
+            const order = orders && (await orders.findOne({ transactionId: String(reference) }));
+            if (order && order.stitchLinkId) {
+                const resLink = await axios.get(
+                    `${STITCH_API}/api/v1/payment-links/${encodeURIComponent(order.stitchLinkId)}`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                link = resLink.data && resLink.data.data && resLink.data.data.payment;
+            }
+        }
+
+        if (!link) return res.status(404).json({ error: "Payment link not found" });
+
+        const paid = link.status === "PAID";
+        if (paid) await confirmOrderPayment(link.merchantReference || reference, "Stitch");
+
+        res.json({
+            success: true,
+            status: link.status,
+            paid,
+            amount: link.amount || null,
+            reference: link.merchantReference || reference || null,
+        });
+    } catch (err) {
+        console.error("❌ STITCH STATUS ERROR:", err.response?.data || err.message);
+        res.status(500).json({ error: "Could not check payment status" });
+    }
+});
+
+// payment.paid arrives here. Signature first, then match it to an order.
+app.post("/api/webhooks/stitch", async (req, res) => {
+    const raw = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : "";
+    if (!verifySvixSignature(req, raw, STITCH_WEBHOOK_SECRET)) {
+        return res.status(401).json({ error: "Invalid webhook signature" });
+    }
+
+    let payload;
+    try {
+        payload = JSON.parse(raw);
+    } catch (_) {
+        return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    if (payload.status !== "PAID") return res.json({ received: true });
+
+    try {
+        const orders = await collection("orders");
+        let order =
+            orders && payload.linkId
+                ? await orders.findOne({ stitchLinkId: payload.linkId })
+                : null;
+
+        // The webhook payload has no merchantReference — fetch the payment
+        // details to find it when the order wasn't stored with the link id.
+        if (!order && payload.id) {
+            const token = await getStitchToken();
+            const paymentRes = await axios.get(
+                `${STITCH_API}/api/v1/payment/${encodeURIComponent(payload.id)}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            const payment =
+                paymentRes.data && paymentRes.data.data && paymentRes.data.data.payment;
+            const ref = payment && payment.merchantReference;
+            if (ref && orders) order = await orders.findOne({ transactionId: ref });
+        }
+
+        // Test events must never fulfil live orders and vice versa.
+        const modeMatches = order && (!order.stitchMode || order.stitchMode === STITCH_MODE);
+        const amountMatches = order && payload.amount === Math.round(Number(order.total) * 100);
+        if (order && modeMatches && amountMatches) {
+            await confirmOrderPayment(order.transactionId, "Stitch");
+            console.log(`✅ Stitch webhook paid order ${order.transactionId}`);
+        } else {
+            console.log(
+                "⚠️ Stitch webhook ignored — no matching order / mode / amount",
+                payload.linkId || payload.id
+            );
+        }
+
+        res.json({ received: true });
+    } catch (err) {
+        console.error("❌ STITCH WEBHOOK ERROR:", err.response?.data || err.message);
+        res.status(500).json({ error: "Webhook handling failed" });
+    }
+});
+
+// ======================================================
 // 5. CHECKOUT (BULLETPROOF FIXED VERSION)
 // ======================================================
 app.post("/checkout", async (req, res) => {
-    const { name, email, phone, cart, total, address, shippingOption, paymentMethod } = req.body;
+    const {
+        name,
+        email,
+        phone,
+        cart,
+        total,
+        address,
+        shippingOption,
+        paymentMethod,
+        paymentLinkId,
+    } = req.body;
     // Optional client-supplied reference so Paystack and the order can share
     // the same id (must match what Paystack allows: A-Z a-z 0-9 . _ -)
     const clientTxn =
@@ -412,6 +659,9 @@ app.post("/checkout", async (req, res) => {
                 total: grandTotal,
                 shippingOption,
                 paymentMethod: paymentMethod || "EFT",
+                // Lets the Stitch webhook match payment.paid to this order.
+                stitchLinkId: paymentMethod === "stitch" ? paymentLinkId || null : null,
+                stitchMode: paymentMethod === "stitch" ? STITCH_MODE : null,
                 status: initialStatus(),
                 history: [{ status: initialStatus(), at: now, by: "System" }],
                 sourceToken: sessionToken,

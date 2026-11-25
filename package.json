@@ -1,11 +1,12 @@
 {
   "name": "localtech-backend",
   "version": "1.0.0",
-  "description": "LocalTech backend - contact, booking, checkout and Paystack payment endpoints",
+  "description": "LocalTech backend - contact, booking, checkout and payment endpoints",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test-e2e.js"
+    "test": "node test-e2e.js",
+    "stitch:setup": "node register-stitch.js"
   },
   "keywords": [],
   "author": "",
